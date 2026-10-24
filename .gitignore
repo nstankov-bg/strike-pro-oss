@@ -1,0 +1,10 @@
+# Build output contains the vendor's binary and assets; never commit it.
+build/
+*.app
+*.iconset
+# Reverse-engineering artefacts derived from the vendor binary.
+*.rea-snapshot
+*.strings.txt
+Panel*
+.DS_Store
+__pycache__/
