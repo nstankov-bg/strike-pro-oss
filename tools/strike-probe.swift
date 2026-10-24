@@ -16,6 +16,8 @@ import DiskArbitration
 import Foundation
 import IOKit
 
+typealias Output = (String) -> Void
+
 func str(_ obj: MIDIObjectRef, _ key: CFString) -> String? {
     var s: Unmanaged<CFString>?
     guard MIDIObjectGetStringProperty(obj, key, &s) == noErr, let v = s?.takeRetainedValue() else { return nil }
@@ -27,69 +29,95 @@ func int(_ obj: MIDIObjectRef, _ key: CFString) -> Int32? {
     return MIDIObjectGetIntegerProperty(obj, key, &v) == noErr ? v : nil
 }
 
-func editorMatches(_ ep: MIDIEndpointRef) -> (Bool, String) {
-    let offline = int(ep, kMIDIPropertyOffline)
-    let mfr = str(ep, kMIDIPropertyManufacturer)
-    let model = str(ep, kMIDIPropertyModel)
-    let name = str(ep, kMIDIPropertyName)
-    let desc = "manufacturer=\(mfr.map { "\"\($0)\"" } ?? "nil") model=\(model.map { "\"\($0)\"" } ?? "nil") name=\(name.map { "\"\($0)\"" } ?? "nil") offline=\(offline.map(String.init) ?? "nil")"
+/// The editor's acceptance rule for one endpoint, given its properties.
+func matchDecision(offline: Int32?, manufacturer: String?, model: String?, name: String?) -> (Bool, String) {
+    func q(_ s: String?) -> String { s.map { "\"\($0)\"" } ?? "nil" }
+    let desc = "manufacturer=\(q(manufacturer)) model=\(q(model)) name=\(q(name)) offline=\(offline.map(String.init) ?? "nil")"
     guard offline == 0 else { return (false, desc + "  -> rejected: offline property not readable/zero") }
-    guard let m = mfr, m.lowercased().contains("alesis") else { return (false, desc + "  -> rejected: manufacturer") }
+    guard let m = manufacturer, m.lowercased().contains("alesis") else { return (false, desc + "  -> rejected: manufacturer") }
     guard let md = model, md.lowercased().contains("alesis strike") else { return (false, desc + "  -> rejected: model") }
     guard let n = name, n.lowercased().contains("alesis strike") else { return (false, desc + "  -> rejected: name") }
     return (true, desc + "  -> MATCH")
 }
 
-print("== MIDI (editor needs one matching destination AND one matching source)")
-var destOK = false, srcOK = false
-for i in 0..<MIDIGetNumberOfDestinations() {
-    let (ok, d) = editorMatches(MIDIGetDestination(i)); destOK = destOK || ok
-    print("  dest[\(i)] \(d)")
+func editorMatches(_ ep: MIDIEndpointRef) -> (Bool, String) {
+    matchDecision(offline: int(ep, kMIDIPropertyOffline), manufacturer: str(ep, kMIDIPropertyManufacturer),
+                  model: str(ep, kMIDIPropertyModel), name: str(ep, kMIDIPropertyName))
 }
-for i in 0..<MIDIGetNumberOfSources() {
-    let (ok, d) = editorMatches(MIDIGetSource(i)); srcOK = srcOK || ok
-    print("  src[\(i)]  \(d)")
-}
-print("  result: destination \(destOK ? "FOUND" : "MISSING"), source \(srcOK ? "FOUND" : "MISSING")")
 
-print("\n== USB drive (IORegistry service named exactly \"Alesis Strike\")")
-var iter: io_iterator_t = 0
-var found = false
-if IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceNameMatching("Alesis Strike"), &iter) == KERN_SUCCESS {
-    var svc = IOIteratorNext(iter)
-    while svc != 0 {
-        found = true
-        var cls = [CChar](repeating: 0, count: 128)
-        IOObjectGetClass(svc, &cls)
-        print("  service class=\(String(cString: cls))")
-        if let bsd = IORegistryEntrySearchCFProperty(svc, kIOServicePlane, "BSD Name" as CFString, kCFAllocatorDefault,
-                                                     IOOptionBits(kIORegistryIterateRecursively)) as? String {
-            let dev = "/dev/\(bsd)s1"
-            print("  BSD Name=\(bsd)  editor assumes partition \(dev)")
-            if let session = DASessionCreate(kCFAllocatorDefault),
-               let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, dev),
-               let d = DADiskCopyDescription(disk) as? [CFString: Any] {
-                let vol = d[kDADiskDescriptionVolumeNameKey] as? String
-                let mnt = (d[kDADiskDescriptionVolumePathKey] as? URL)?.path
-                print("  volume name=\(vol ?? "nil")  editor will use /Volumes/\(vol ?? "?")  actual mount=\(mnt ?? "not mounted")")
-                if let vol, let mnt, mnt != "/Volumes/\(vol)" {
-                    // Usually a leftover "/Volumes/<name>" from an unclean unplug pushes the real mount to "<name> 1".
-                    print("  WARNING: actual mount path differs from what the editor builds")
-                    print("  Suggested fix (review first; this probe never runs it):")
-                    print("    1. quit the editor and eject nothing else that is writing to the module")
-                    print("    2. ls -la \"/Volumes/\(vol)\"        # should be an empty, stale folder")
-                    print("    3. sudo rmdir \"/Volumes/\(vol)\"    # only if step 2 showed it empty")
-                    print("    4. diskutil unmount \(dev) && diskutil mount \(dev)")
+/// Checks every CoreMIDI destination and source. Returns whether each direction has a match.
+@discardableResult
+func probeMIDI(_ out: Output = { print($0) }) -> (destination: Bool, source: Bool) {
+    out("== MIDI (editor needs one matching destination AND one matching source)")
+    var destOK = false, srcOK = false
+    for i in 0..<MIDIGetNumberOfDestinations() {
+        let (ok, d) = editorMatches(MIDIGetDestination(i)); destOK = destOK || ok
+        out("  dest[\(i)] \(d)")
+    }
+    for i in 0..<MIDIGetNumberOfSources() {
+        let (ok, d) = editorMatches(MIDIGetSource(i)); srcOK = srcOK || ok
+        out("  src[\(i)]  \(d)")
+    }
+    out("  result: destination \(destOK ? "FOUND" : "MISSING"), source \(srcOK ? "FOUND" : "MISSING")")
+    return (destOK, srcOK)
+}
+
+/// Lines to print when the drive is mounted somewhere other than the "/Volumes/<name>" the editor builds.
+/// Empty when the paths agree. The probe prints these; it never runs them.
+func mountAdvice(volume: String?, mountPoint: String?, device: String) -> [String] {
+    guard let vol = volume, let mnt = mountPoint, mnt != "/Volumes/\(vol)" else { return [] }
+    // Usually a leftover "/Volumes/<name>" from an unclean unplug pushes the real mount to "<name> 1".
+    return [
+        "  WARNING: actual mount path differs from what the editor builds",
+        "  Suggested fix (review first; this probe never runs it):",
+        "    1. quit the editor and wait for any transfers to the module to finish",
+        "    2. ls -la \"/Volumes/\(vol)\"        # should be an empty, stale folder",
+        "    3. sudo rmdir \"/Volumes/\(vol)\"    # only if step 2 showed it empty",
+        "    4. diskutil unmount \(device) && diskutil mount \(device)",
+    ]
+}
+
+/// Follows the editor's drive lookup. Returns whether an "Alesis Strike" registry service exists.
+@discardableResult
+func probeDrive(_ out: Output = { print($0) }) -> Bool {
+    out("\n== USB drive (IORegistry service named exactly \"Alesis Strike\")")
+    var iter: io_iterator_t = 0
+    var found = false
+    if IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceNameMatching("Alesis Strike"), &iter) == KERN_SUCCESS {
+        var svc = IOIteratorNext(iter)
+        while svc != 0 {
+            found = true
+            var cls = [CChar](repeating: 0, count: 128)
+            IOObjectGetClass(svc, &cls)
+            out("  service class=\(String(cString: cls))")
+            if let bsd = IORegistryEntrySearchCFProperty(svc, kIOServicePlane, "BSD Name" as CFString, kCFAllocatorDefault,
+                                                         IOOptionBits(kIORegistryIterateRecursively)) as? String {
+                let dev = "/dev/\(bsd)s1"
+                out("  BSD Name=\(bsd)  editor assumes partition \(dev)")
+                if let session = DASessionCreate(kCFAllocatorDefault),
+                   let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, dev),
+                   let d = DADiskCopyDescription(disk) as? [CFString: Any] {
+                    let vol = d[kDADiskDescriptionVolumeNameKey] as? String
+                    let mnt = (d[kDADiskDescriptionVolumePathKey] as? URL)?.path
+                    out("  volume name=\(vol ?? "nil")  editor will use /Volumes/\(vol ?? "?")  actual mount=\(mnt ?? "not mounted")")
+                    mountAdvice(volume: vol, mountPoint: mnt, device: dev).forEach(out)
+                } else {
+                    out("  WARNING: \(dev) not found — editor's partition-1 assumption fails")
                 }
             } else {
-                print("  WARNING: \(dev) not found — editor's partition-1 assumption fails")
+                out("  WARNING: no BSD Name under this service (drive not exposed/mounted)")
             }
-        } else {
-            print("  WARNING: no BSD Name under this service (drive not exposed/mounted)")
+            IOObjectRelease(svc)
+            svc = IOIteratorNext(iter)
         }
-        IOObjectRelease(svc)
-        svc = IOIteratorNext(iter)
+        IOObjectRelease(iter)
     }
-    IOObjectRelease(iter)
+    if !found { out("  no IORegistry service named \"Alesis Strike\" (kit not connected, or macOS names it differently)") }
+    return found
 }
-if !found { print("  no IORegistry service named \"Alesis Strike\" (kit not connected, or macOS names it differently)") }
+
+// Tests load this file with STRIKE_TEST set and call the functions directly.
+if ProcessInfo.processInfo.environment["STRIKE_TEST"] == nil {
+    probeMIDI()
+    probeDrive()
+}

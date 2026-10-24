@@ -58,6 +58,20 @@ The rebuilt app is ad-hoc signed, so it needs an allow rule. `build.sh` prints o
 3. **Drive mount path mismatch:** follow the commands the probe prints. The probe never runs them itself.
 4. Backups log to `~/Library/Logs/strike-backup.log`. If launchd runs fail, allow `/bin/zsh` access to removable volumes in System Settings › Privacy & Security.
 
+## Tests
+
+Every function in every script has a test, and `tests/test_coverage.py` fails the suite when one doesn't.
+
+```sh
+./run-tests.sh
+```
+
+- **Python tools:** tested with `unittest`.
+- **zsh scripts:** sourced, with each function called in isolation. `build.sh` runs against a generated stand-in bundle, so the vendor's app isn't needed.
+- **Swift scripts:** run through the interpreter. No compiled test binaries are produced, so this works under Santa Lockdown. The probe's tests create virtual CoreMIDI endpoints, so no module is needed.
+
+CI runs the same suite on macOS for every push.
+
 ## License
 
 MIT for everything in this repository. See [LICENSE](LICENSE).

@@ -65,37 +65,48 @@ func save(_ rep: NSBitmapImageRep, _ path: String) {
     print("wrote \(path) \(rep.pixelsWide)x\(rep.pixelsHigh)")
 }
 
-let resources = CommandLine.arguments[1]
-let iconset = CommandLine.arguments[2]
+/// Renders the two logo sprite sheets into `resources`, keeping the original file names and sizes.
+func renderLogos(into resources: String) {
+    save(canvas(658, 290) {
+        slanted([("STRIKE PRO", blue)], in: CGRect(x: 30, y: 20, width: 535, height: 95))
+        slanted([("OSS", light)], in: CGRect(x: 32, y: 141, width: 592, height: 144))
+    }, "\(resources)/productlogos.png")
 
-save(canvas(658, 290) {
-    slanted([("STRIKE PRO", blue)], in: CGRect(x: 30, y: 20, width: 535, height: 95))
-    slanted([("OSS", light)], in: CGRect(x: 32, y: 141, width: 592, height: 144))
-}, "\(resources)/productlogos.png")
+    save(canvas(308, 32) {
+        slanted([("STRIKE PRO ", blue), ("OSS", light)], in: CGRect(x: 2, y: 3, width: 304, height: 26), center: false)
+    }, "\(resources)/alesis_strike_logo.png")
+}
 
-save(canvas(308, 32) {
-    slanted([("STRIKE PRO ", blue), ("OSS", light)], in: CGRect(x: 2, y: 3, width: 304, height: 26), center: false)
-}, "\(resources)/alesis_strike_logo.png")
-
-// App icon: dark rounded tile with a blue ring, blue "SP", light "OSS".
-try? FileManager.default.createDirectory(atPath: iconset, withIntermediateDirectories: true)
-for pt in [16, 32, 128, 256, 512] {
-    for scale in [1, 2] {
-        let px = pt * scale
-        let f = CGFloat(px) / 1024
-        let rep = canvas(px, px) {
-            let tile = CGRect(x: 100 * f, y: 100 * f, width: 824 * f, height: 824 * f)
-            dark.setFill()
-            NSBezierPath(roundedRect: tile, xRadius: 185 * f, yRadius: 185 * f).fill()
-            blue.setStroke()
-            let ring = NSBezierPath(roundedRect: tile.insetBy(dx: 26 * f, dy: 26 * f), xRadius: 160 * f, yRadius: 160 * f)
-            ring.lineWidth = 18 * f
-            ring.stroke()
-            slanted([("SP", blue)], in: CGRect(x: 180 * f, y: 230 * f, width: 664 * f, height: 380 * f))
-            if px >= 64 {
-                slanted([("OSS", light)], in: CGRect(x: 280 * f, y: 650 * f, width: 464 * f, height: 130 * f))
-            }
+/// App icon at `px` pixels: dark rounded tile with a blue ring, blue "SP", light "OSS" (omitted when tiny).
+func renderIcon(px: Int) -> NSBitmapImageRep {
+    let f = CGFloat(px) / 1024
+    return canvas(px, px) {
+        let tile = CGRect(x: 100 * f, y: 100 * f, width: 824 * f, height: 824 * f)
+        dark.setFill()
+        NSBezierPath(roundedRect: tile, xRadius: 185 * f, yRadius: 185 * f).fill()
+        blue.setStroke()
+        let ring = NSBezierPath(roundedRect: tile.insetBy(dx: 26 * f, dy: 26 * f), xRadius: 160 * f, yRadius: 160 * f)
+        ring.lineWidth = 18 * f
+        ring.stroke()
+        slanted([("SP", blue)], in: CGRect(x: 180 * f, y: 230 * f, width: 664 * f, height: 380 * f))
+        if px >= 64 {
+            slanted([("OSS", light)], in: CGRect(x: 280 * f, y: 650 * f, width: 464 * f, height: 130 * f))
         }
-        save(rep, "\(iconset)/icon_\(pt)x\(pt)\(scale == 2 ? "@2x" : "").png")
     }
+}
+
+/// Writes every size iconutil expects into `iconset`.
+func renderIconset(into iconset: String) {
+    try? FileManager.default.createDirectory(atPath: iconset, withIntermediateDirectories: true)
+    for pt in [16, 32, 128, 256, 512] {
+        for scale in [1, 2] {
+            save(renderIcon(px: pt * scale), "\(iconset)/icon_\(pt)x\(pt)\(scale == 2 ? "@2x" : "").png")
+        }
+    }
+}
+
+// Tests load this file with STRIKE_TEST set and call the functions directly.
+if ProcessInfo.processInfo.environment["STRIKE_TEST"] == nil {
+    renderLogos(into: CommandLine.arguments[1])
+    renderIconset(into: CommandLine.arguments[2])
 }

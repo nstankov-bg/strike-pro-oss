@@ -85,27 +85,22 @@ def walk(root):
             yield dirpath, name
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("path")
-    ap.add_argument("--reference", help="folder of known-good samples (e.g. the module's own SAMPLES)")
-    ap.add_argument("--clean", action="store_true", help="delete ._* and .DS_Store files after confirmation")
-    ap.add_argument("--fix", metavar="OUTDIR", help="write 16-bit/44.1 kHz PCM copies of flagged files here")
-    args = ap.parse_args()
+def reference_formats(root):
+    """Counter of format descriptions used by the known-good samples under `root`."""
+    allowed = collections.Counter()
+    for d, n in walk(root):
+        if n.lower().endswith(".wav") and not n.startswith("._"):
+            fmt, _ = parse_wav(os.path.join(d, n))
+            if fmt:
+                allowed[describe(fmt)] += 1
+    return allowed
 
-    allowed = None
-    if args.reference:
-        allowed = collections.Counter()
-        for d, n in walk(args.reference):
-            if n.lower().endswith(".wav") and not n.startswith("._"):
-                fmt, _ = parse_wav(os.path.join(d, n))
-                if fmt:
-                    allowed[describe(fmt)] += 1
-        print(f"reference formats: {dict(allowed)}")
 
+def scan(root, allowed=None):
+    """Checks every WAV under `root`. Returns a dict with flagged, per_dir, formats, duplicates, litter."""
     litter, flagged, per_dir = [], {}, collections.Counter()
     formats, by_hash = collections.Counter(), collections.defaultdict(list)
-    for d, n in walk(args.path):
+    for d, n in walk(root):
         p = os.path.join(d, n)
         if n.startswith("._") or n == ".DS_Store":
             litter.append(p)
@@ -122,33 +117,66 @@ def main():
                 problems.append(f"format {describe(fmt)} not used by any reference sample")
         if problems:
             flagged[p] = problems
+    duplicates = [paths for paths in by_hash.values() if len(paths) > 1]
+    return {"flagged": flagged, "per_dir": per_dir, "formats": formats, "duplicates": duplicates, "litter": litter}
 
-    print(f"\nscanned {sum(per_dir.values())} WAV files in {len(per_dir)} folders; formats: {dict(formats)}")
-    for p, problems in sorted(flagged.items()):
-        print(f"  BAD  {p}\n       - " + "\n       - ".join(problems))
+
+def report(result, out=print):
+    per_dir = result["per_dir"]
+    out(f"\nscanned {sum(per_dir.values())} WAV files in {len(per_dir)} folders; formats: {dict(result['formats'])}")
+    for p, problems in sorted(result["flagged"].items()):
+        out(f"  BAD  {p}\n       - " + "\n       - ".join(problems))
     for d, n in per_dir.items():
         if n > MAX_SAMPLES:
-            print(f"  WARN {d}: {n} samples; the editor accepts at most {MAX_SAMPLES} per instrument")
-    for paths in by_hash.values():
-        if len(paths) > 1:
-            print("  DUP  identical audio:\n       " + "\n       ".join(paths))
-    if litter:
-        print(f"  INFO {len(litter)} macOS metadata files (._*, .DS_Store); remove with --clean")
+            out(f"  WARN {d}: {n} samples; the editor accepts at most {MAX_SAMPLES} per instrument")
+    for paths in result["duplicates"]:
+        out("  DUP  identical audio:\n       " + "\n       ".join(paths))
+    if result["litter"]:
+        out(f"  INFO {len(result['litter'])} macOS metadata files (._*, .DS_Store); remove with --clean")
 
-    if args.clean and litter:
-        if input(f"delete {len(litter)} metadata files? [y/N] ").strip().lower() == "y":
-            for p in litter:
-                os.remove(p)
-            print("  cleaned")
 
-    if args.fix and flagged:
-        os.makedirs(args.fix, exist_ok=True)
-        for p in flagged:
-            out = os.path.join(args.fix, os.path.basename(p))
-            r = subprocess.run(["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16@44100", p, out], capture_output=True, text=True)
-            print(f"  {'fixed' if r.returncode == 0 else 'FAILED'} {out}" + (f": {r.stderr.strip()}" if r.returncode else ""))
+def clean_litter(litter, confirm=input, out=print):
+    """Deletes macOS metadata files after confirmation. Returns how many were removed."""
+    if not litter or confirm(f"delete {len(litter)} metadata files? [y/N] ").strip().lower() != "y":
+        return 0
+    for p in litter:
+        os.remove(p)
+    out("  cleaned")
+    return len(litter)
 
-    return 1 if flagged else 0
+
+def fix_files(paths, outdir, out=print, afconvert="/usr/bin/afconvert"):
+    """Writes 16-bit/44.1 kHz PCM copies of `paths` into `outdir`. Returns the paths that converted."""
+    os.makedirs(outdir, exist_ok=True)
+    fixed = []
+    for p in paths:
+        dest = os.path.join(outdir, os.path.basename(p))
+        r = subprocess.run([afconvert, "-f", "WAVE", "-d", "LEI16@44100", p, dest], capture_output=True, text=True)
+        if r.returncode == 0:
+            fixed.append(dest)
+        out(f"  {'fixed' if r.returncode == 0 else 'FAILED'} {dest}" + (f": {r.stderr.strip()}" if r.returncode else ""))
+    return fixed
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("path")
+    ap.add_argument("--reference", help="folder of known-good samples (e.g. the module's own SAMPLES)")
+    ap.add_argument("--clean", action="store_true", help="delete ._* and .DS_Store files after confirmation")
+    ap.add_argument("--fix", metavar="OUTDIR", help="write 16-bit/44.1 kHz PCM copies of flagged files here")
+    args = ap.parse_args(argv)
+
+    allowed = None
+    if args.reference:
+        allowed = reference_formats(args.reference)
+        print(f"reference formats: {dict(allowed)}")
+    result = scan(args.path, allowed)
+    report(result)
+    if args.clean:
+        clean_litter(result["litter"])
+    if args.fix and result["flagged"]:
+        fix_files(result["flagged"], args.fix)
+    return 1 if result["flagged"] else 0
 
 
 if __name__ == "__main__":
