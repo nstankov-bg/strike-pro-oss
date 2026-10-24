@@ -77,6 +77,15 @@ func mountAdvice(volume: String?, mountPoint: String?, device: String) -> [Strin
     ]
 }
 
+/// Volume name, mount path and writability from a DiskArbitration description.
+/// Reads keys the way the editor does (CF lookups); bridging to [CFString: Any] silently misses them.
+func volumeInfo(_ description: NSDictionary) -> (name: String?, path: String?, writable: Bool?) {
+    let name = description[kDADiskDescriptionVolumeNameKey as String] as? String
+    let path = (description[kDADiskDescriptionVolumePathKey as String] as? URL)?.path
+    let writable = description[kDADiskDescriptionMediaWritableKey as String] as? Bool
+    return (name, path, writable)
+}
+
 /// Follows the editor's drive lookup. Returns whether an "Alesis Strike" registry service exists.
 @discardableResult
 func probeDrive(_ out: Output = { print($0) }) -> Bool {
@@ -96,10 +105,12 @@ func probeDrive(_ out: Output = { print($0) }) -> Bool {
                 out("  BSD Name=\(bsd)  editor assumes partition \(dev)")
                 if let session = DASessionCreate(kCFAllocatorDefault),
                    let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, dev),
-                   let d = DADiskCopyDescription(disk) as? [CFString: Any] {
-                    let vol = d[kDADiskDescriptionVolumeNameKey] as? String
-                    let mnt = (d[kDADiskDescriptionVolumePathKey] as? URL)?.path
+                   let d = DADiskCopyDescription(disk) as NSDictionary? {
+                    let (vol, mnt, writable) = volumeInfo(d)
                     out("  volume name=\(vol ?? "nil")  editor will use /Volumes/\(vol ?? "?")  actual mount=\(mnt ?? "not mounted")")
+                    if writable == false {
+                        out("  NOTE: the module exposes this drive read-only; the editor can read it but not save to it")
+                    }
                     mountAdvice(volume: vol, mountPoint: mnt, device: dev).forEach(out)
                 } else {
                     out("  WARNING: \(dev) not found — editor's partition-1 assumption fails")

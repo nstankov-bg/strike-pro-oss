@@ -82,6 +82,20 @@ func test_mountAdvice() {
     expect(advice.contains("diskutil unmount /dev/disk4s1 && diskutil mount /dev/disk4s1"), "remount command")
 }
 
+func test_volumeInfo() {
+    // Built through CF, like DADiskCopyDescription returns it.
+    let d = NSMutableDictionary()
+    d[kDADiskDescriptionVolumeNameKey as String] = "NO NAME"
+    d[kDADiskDescriptionVolumePathKey as String] = URL(fileURLWithPath: "/Volumes/NO NAME", isDirectory: true)
+    d[kDADiskDescriptionMediaWritableKey as String] = false
+    let info = volumeInfo(d)
+    expect(info.name == "NO NAME", "name \(String(describing: info.name))")
+    expect(info.path == "/Volumes/NO NAME", "path \(String(describing: info.path))")
+    expect(info.writable == false, "writable")
+    let empty = volumeInfo(NSDictionary())
+    expect(empty.name == nil && empty.path == nil && empty.writable == nil, "missing keys give nil")
+}
+
 func test_probeDrive() {
     var lines: [String] = []
     let found = probeDrive { lines.append($0) }
@@ -96,5 +110,6 @@ test("test_matchDecision", test_matchDecision)
 test("test_editorMatches", test_editorMatches)
 test("test_probeMIDI", test_probeMIDI)
 test("test_mountAdvice", test_mountAdvice)
+test("test_volumeInfo", test_volumeInfo)
 test("test_probeDrive", test_probeDrive)
 finish()
