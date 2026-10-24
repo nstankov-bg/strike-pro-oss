@@ -25,9 +25,18 @@ It needs one matching destination and one matching source. While connected, the 
 4. Ask DiskArbitration for that partition's volume name, then build the path `/Volumes/<volume name>`.
 5. Confirm it against the mounted filesystems (`getfsstat`).
 
-Expected content folders on the volume: `KITS/`, `INSTRUMENTS/`, `SAMPLES/`.
+The module exposes **two** drives under that service, one whole disk each:
+
+| Drive | Typical size | Access | Contents |
+|---|---|---|---|
+| internal (factory) | ~8 GB | read-only | `Kits/`, `Instruments/`, `Samples/`, `Loops/`, `Ext/` |
+| user (SD card) | card size | writable | your kits, instruments and samples |
+
+Both are formatted FAT32 and usually labelled `NO NAME`.
 
 ### Known ways this breaks
+
+- **Label collision.** Both drives are labelled `NO NAME`, so macOS mounts one at `/Volumes/NO NAME` and the other at `/Volumes/NO NAME 1`. A path built from the label alone, `/Volumes/<volume name>`, then points at the wrong drive. The editor also records the real mount points from `getfsstat`, but which of the two paths its browsers use hasn't been confirmed. The probe flags the collision and suggests giving the card a unique label.
 
 - **Suffixed mount point.** A stale `/Volumes/<name>` folder left by an unclean unplug makes macOS mount the drive at `/Volumes/<name> 1`. The editor still builds `/Volumes/<name>`, so the file browsers stay empty. The probe detects this and prints the fix.
 - **Different partition layout.** If the content isn't on partition `s1`, the drive isn't found.

@@ -80,6 +80,19 @@ func test_mountAdvice() {
     expect(advice.contains("WARNING"), "warning")
     expect(advice.contains("sudo rmdir \"/Volumes/STRIKE\""), "stale folder removal")
     expect(advice.contains("diskutil unmount /dev/disk4s1 && diskutil mount /dev/disk4s1"), "remount command")
+    let collision = mountAdvice(volume: "NO NAME", mountPoint: "/Volumes/NO NAME 1", device: "/dev/disk5s1",
+                                occupiedBy: "/dev/disk6s1").joined(separator: "\n")
+    expect(collision.contains("different drive (/dev/disk6s1)"), "collision is reported as such")
+    expect(collision.contains("diskutil rename /dev/disk5s1"), "suggests relabelling")
+    expect(!collision.contains("rmdir"), "must not suggest removing a real mount point")
+    let selfOccupied = mountAdvice(volume: "X", mountPoint: "/Volumes/X 1", device: "/dev/disk5s1", occupiedBy: "/dev/disk5s1")
+    expect(selfOccupied.joined().contains("rmdir"), "same device falls back to the stale-folder advice")
+}
+
+func test_mountedDevice() {
+    expect(mountedDevice(at: "/")?.hasPrefix("/dev/disk") == true, "root volume device: \(String(describing: mountedDevice(at: "/")))")
+    expect(mountedDevice(at: "/usr") == nil, "/usr is not itself a mount point")
+    expect(mountedDevice(at: "/definitely/not/here") == nil, "missing path")
 }
 
 func test_volumeInfo() {
@@ -96,6 +109,19 @@ func test_volumeInfo() {
     expect(empty.name == nil && empty.path == nil && empty.writable == nil, "missing keys give nil")
 }
 
+func test_wholeDisks() {
+    expect(wholeDisks(["disk6s1", "disk6", "disk5", "disk5", "disk10", "diskX"]) == ["disk10", "disk5", "disk6"], "\(wholeDisks(["disk6s1", "disk6", "disk5", "disk5", "disk10", "diskX"]))")
+    expect(wholeDisks([]).isEmpty, "empty")
+}
+
+func test_bsdNames() {
+    // The registry root's subtree contains this Mac's own disks.
+    let root = IORegistryGetRootEntry(kIOMainPortDefault)
+    let names = bsdNames(under: root)
+    expect(names.contains { $0.hasPrefix("disk") }, "expected some disks under the registry root, got \(names.prefix(5))")
+    expect(bsdNames(under: 0).isEmpty, "invalid entry gives no names")
+}
+
 func test_probeDrive() {
     var lines: [String] = []
     let found = probeDrive { lines.append($0) }
@@ -110,6 +136,9 @@ test("test_matchDecision", test_matchDecision)
 test("test_editorMatches", test_editorMatches)
 test("test_probeMIDI", test_probeMIDI)
 test("test_mountAdvice", test_mountAdvice)
+test("test_mountedDevice", test_mountedDevice)
 test("test_volumeInfo", test_volumeInfo)
+test("test_wholeDisks", test_wholeDisks)
+test("test_bsdNames", test_bsdNames)
 test("test_probeDrive", test_probeDrive)
 finish()

@@ -38,10 +38,36 @@ class BackupTest(TempDirTestCase):
         self.assertIn("ERROR: it broke", r.stdout)
         self.assertIn("rc=1", r.stdout)
 
-    def test_find_volume(self):
-        self.assertEqual(self.zsh("find_volume").stdout.strip(), self.vol)
-        # Without an override it asks IOKit; with no module attached that yields nothing (and still succeeds).
-        r = self.zsh('find_volume; print "rc=$?"', STRIKE_VOLUME="")
+    def fake_module(self):
+        """Stub ioreg/diskutil describing a module with a read-only internal drive and a writable card."""
+        internal = self.path("vol")  # the fixture volume from setUp
+        card = self.path("card")
+        self.write("card/KITS/user.skt", b"mine")
+        ioreg = self.write("ioreg", '#!/bin/sh\nprintf \'  "BSD Name" = "disk91"\\n  "BSD Name" = "disk91s1"\\n  "BSD Name" = "disk90"\\n\'\n')
+        diskutil = self.write("diskutil", f"""#!/bin/sh
+case "$2" in
+  disk90) echo "   Media Read-Only:           Yes" ;;
+  disk91) echo "   Media Read-Only:           No" ;;
+  disk90s1) echo "   Mount Point:               {internal}" ;;
+  disk91s1) echo "   Mount Point:               {card}" ;;
+esac
+""")
+        for stub in (ioreg, diskutil):
+            os.chmod(stub, 0o755)
+        return {"STRIKE_VOLUME": "", "STRIKE_IOREG": ioreg, "STRIKE_DISKUTIL": diskutil}, internal, card
+
+    def test_disk_role(self):
+        env, _, _ = self.fake_module()
+        self.assertEqual(self.zsh("disk_role disk90", **env).stdout.strip(), "internal")
+        self.assertEqual(self.zsh("disk_role disk91", **env).stdout.strip(), "card")
+
+    def test_find_volumes(self):
+        self.assertEqual(self.zsh("find_volumes").stdout, f"-\t{self.vol}\n")
+        env, internal, card = self.fake_module()
+        lines = sorted(self.zsh("find_volumes", **env).stdout.splitlines())
+        self.assertEqual(lines, [f"card\t{card}", f"internal\t{internal}"])
+        # Real IOKit with no override and (in CI) no module attached: nothing found, still succeeds.
+        r = self.zsh('find_volumes; print "rc=$?"', STRIKE_VOLUME="")
         self.assertTrue(r.stdout.strip().endswith("rc=0"))
 
     def test_content_files(self):
@@ -92,18 +118,41 @@ class BackupTest(TempDirTestCase):
         self.assertEqual(len(self.snapshots()), 2)
         self.assertEqual(os.stat(os.path.join(second, "SAMPLES", "s0.wav")).st_nlink, 2, "unchanged files are hard-linked")
 
-    def test_main(self):
-        run = lambda *args, **env: subprocess.run(["/bin/zsh", os.path.join(ROOT, SCRIPT), *args],
-                                                  capture_output=True, text=True, env={**os.environ, **self.env, **env})
-        self.assertEqual(run().returncode, 0)
+    def test_backup_volume(self):
+        r = self.zsh(f'backup_volume "{self.vol}"')
+        self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(len(self.snapshots()), 1)
-        self.assertEqual(run("--bogus").returncode, 2)
-        self.assertEqual(run("--if-present", STRIKE_VOLUME=self.path("missing")).returncode, 0)
-        self.assertEqual(run(STRIKE_VOLUME=self.path("missing")).returncode, 1)
         for i in range(20):
             os.remove(self.path(f"vol/SAMPLES/s{i}.wav"))
-        refused = run()
+        refused = self.zsh(f'backup_volume "{self.vol}"')
         self.assertEqual(refused.returncode, 1)
         self.assertIn("refusing", refused.stdout)
-        self.assertEqual(run("--force").returncode, 0)
+        self.assertEqual(self.zsh(f'backup_volume "{self.vol}" 1').returncode, 0)
         self.assertEqual(len(self.snapshots()), 2)
+
+    def run_script(self, *args, **env):
+        return subprocess.run(["/bin/zsh", os.path.join(ROOT, SCRIPT), *args],
+                              capture_output=True, text=True, env={**os.environ, **self.env, **env})
+
+    def test_main(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(len(self.snapshots()), 1)
+        self.assertEqual(self.run_script("--bogus").returncode, 2)
+        self.assertEqual(self.run_script("--if-present", STRIKE_VOLUME=self.path("missing")).returncode, 0)
+        self.assertEqual(self.run_script(STRIKE_VOLUME=self.path("missing")).returncode, 1)
+        for i in range(20):
+            os.remove(self.path(f"vol/SAMPLES/s{i}.wav"))
+        refused = self.run_script()
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("refusing", refused.stdout)
+        self.assertEqual(self.run_script("--force").returncode, 0)
+        self.assertEqual(len(self.snapshots()), 2)
+
+    def test_main_backs_up_each_module_drive_separately(self):
+        env, _, _ = self.fake_module()
+        r = self.run_script(**env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for role, expected in (("internal", "SAMPLES/s0.wav"), ("card", "KITS/user.skt")):
+            snaps = [d for d in os.listdir(os.path.join(self.dest, role)) if d.startswith("20")]
+            self.assertEqual(len(snaps), 1, role)
+            self.assertTrue(os.path.isfile(os.path.join(self.dest, role, snaps[0], expected)), role)

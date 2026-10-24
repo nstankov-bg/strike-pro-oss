@@ -62,10 +62,29 @@ func probeMIDI(_ out: Output = { print($0) }) -> (destination: Bool, source: Boo
     return (destOK, srcOK)
 }
 
+/// The device mounted at `path` ("/dev/disk6s1"), or nil if nothing is mounted exactly there.
+func mountedDevice(at path: String) -> String? {
+    var fs = statfs()
+    guard statfs(path, &fs) == 0 else { return nil }
+    let on = withUnsafeBytes(of: fs.f_mntonname) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
+    guard on == path else { return nil }
+    return withUnsafeBytes(of: fs.f_mntfromname) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
+}
+
 /// Lines to print when the drive is mounted somewhere other than the "/Volumes/<name>" the editor builds.
-/// Empty when the paths agree. The probe prints these; it never runs them.
-func mountAdvice(volume: String?, mountPoint: String?, device: String) -> [String] {
+/// Empty when the paths agree. `occupiedBy` is the device mounted at "/Volumes/<name>", if any.
+/// The probe prints these; it never runs them.
+func mountAdvice(volume: String?, mountPoint: String?, device: String, occupiedBy: String? = nil) -> [String] {
     guard let vol = volume, let mnt = mountPoint, mnt != "/Volumes/\(vol)" else { return [] }
+    if let other = occupiedBy, other != device {
+        // Two drives with the same label (the module labels both "NO NAME"): not a stale folder.
+        return [
+            "  WARNING: \"/Volumes/\(vol)\" is a different drive (\(other)) with the same label;",
+            "           anything that builds the path from the label alone will open that drive instead",
+            "  Possible fix (review first; this probe never runs it): give this drive a unique label, e.g.",
+            "    diskutil rename \(device) STRIKE_SD     # back the drive up first",
+        ]
+    }
     // Usually a leftover "/Volumes/<name>" from an unclean unplug pushes the real mount to "<name> 1".
     return [
         "  WARNING: actual mount path differs from what the editor builds",
@@ -86,6 +105,28 @@ func volumeInfo(_ description: NSDictionary) -> (name: String?, path: String?, w
     return (name, path, writable)
 }
 
+/// Whole-disk BSD names ("disk5", not "disk5s1"), de-duplicated and sorted.
+func wholeDisks(_ names: [String]) -> [String] {
+    Array(Set(names.filter { $0.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil })).sorted()
+}
+
+/// Every "BSD Name" in the registry subtree under `service`.
+func bsdNames(under service: io_registry_entry_t) -> [String] {
+    var names: [String] = []
+    var it: io_iterator_t = 0
+    guard IORegistryEntryCreateIterator(service, kIOServicePlane, IOOptionBits(kIORegistryIterateRecursively), &it) == KERN_SUCCESS else { return names }
+    var entry = IOIteratorNext(it)
+    while entry != 0 {
+        if let name = IORegistryEntryCreateCFProperty(entry, "BSD Name" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
+            names.append(name)
+        }
+        IOObjectRelease(entry)
+        entry = IOIteratorNext(it)
+    }
+    IOObjectRelease(it)
+    return names
+}
+
 /// Follows the editor's drive lookup. Returns whether an "Alesis Strike" registry service exists.
 @discardableResult
 func probeDrive(_ out: Output = { print($0) }) -> Bool {
@@ -99,24 +140,23 @@ func probeDrive(_ out: Output = { print($0) }) -> Bool {
             var cls = [CChar](repeating: 0, count: 128)
             IOObjectGetClass(svc, &cls)
             out("  service class=\(String(cString: cls))")
-            if let bsd = IORegistryEntrySearchCFProperty(svc, kIOServicePlane, "BSD Name" as CFString, kCFAllocatorDefault,
-                                                         IOOptionBits(kIORegistryIterateRecursively)) as? String {
+            // The module exposes one whole disk per drive (internal factory drive, user SD card).
+            let disks = wholeDisks(bsdNames(under: svc))
+            if disks.isEmpty { out("  WARNING: no BSD Name under this service (drive not exposed/mounted)") }
+            for bsd in disks {
                 let dev = "/dev/\(bsd)s1"
                 out("  BSD Name=\(bsd)  editor assumes partition \(dev)")
                 if let session = DASessionCreate(kCFAllocatorDefault),
                    let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, dev),
                    let d = DADiskCopyDescription(disk) as NSDictionary? {
                     let (vol, mnt, writable) = volumeInfo(d)
-                    out("  volume name=\(vol ?? "nil")  editor will use /Volumes/\(vol ?? "?")  actual mount=\(mnt ?? "not mounted")")
-                    if writable == false {
-                        out("  NOTE: the module exposes this drive read-only; the editor can read it but not save to it")
-                    }
-                    mountAdvice(volume: vol, mountPoint: mnt, device: dev).forEach(out)
+                    let role = writable == false ? "internal drive (read-only)" : "user drive (writable)"
+                    out("    \(role): volume name=\(vol ?? "nil")  actual mount=\(mnt ?? "not mounted")")
+                    mountAdvice(volume: vol, mountPoint: mnt, device: dev,
+                                occupiedBy: vol.flatMap { mountedDevice(at: "/Volumes/\($0)") }).forEach(out)
                 } else {
                     out("  WARNING: \(dev) not found — editor's partition-1 assumption fails")
                 }
-            } else {
-                out("  WARNING: no BSD Name under this service (drive not exposed/mounted)")
             }
             IOObjectRelease(svc)
             svc = IOIteratorNext(iter)

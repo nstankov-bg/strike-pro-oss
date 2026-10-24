@@ -10,7 +10,7 @@ Community tooling that keeps the discontinued **Alesis Strike** drum module edit
 |---|---|
 | `build.sh` | Builds **Strike Pro OSS.app** from your installed *Alesis Strike Editor 1.1.6*, without touching the original. See below for what the build changes. |
 | `tools/strike-probe.swift` | Replays the editor's two module-detection checks (MIDI port and USB drive) and explains any failure, including fix commands for a mis-mounted drive. |
-| `tools/strike-backup.sh` | Hard-linked snapshots of the module's drive to `~/StrikeBackups` (keeps 10; unchanged files take no extra space). Refuses to snapshot a drive that is mid-write or suddenly shrank. |
+| `tools/strike-backup.sh` | Hard-linked snapshots of both module drives, the SD card to `~/StrikeBackups/card` and the factory drive to `~/StrikeBackups/internal` (keeps 10 each; unchanged files take no extra space). Refuses to snapshot a drive that is mid-write or suddenly shrank. |
 | `tools/install-backup-agent.sh` | Runs the backup automatically whenever the module's drive mounts. |
 | `tools/strike-check.py` | Read-only preflight for WAV samples: names truncated, non-PCM, odd-format or duplicate files and folders over the 255-sample limit before the editor rejects them. Optional `--fix` writes 16-bit/44.1 kHz copies. |
 | `branding/` | The text, logo, icon and optional colour-theme steps used by `build.sh`. |

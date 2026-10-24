@@ -1,12 +1,16 @@
 #!/bin/zsh
-# strike-backup.sh — hard-linked snapshots of the Strike module's USB drive.
+# strike-backup.sh — hard-linked snapshots of the Strike module's USB drives.
 #
-#   tools/strike-backup.sh                 back up now (fails if the module drive isn't mounted)
-#   tools/strike-backup.sh --if-present    exit quietly when the drive isn't mounted (for launchd)
-#   tools/strike-backup.sh --force         take the snapshot even if it looks much smaller than the last one
+# The module exposes two drives, usually both labelled "NO NAME": the read-only internal (factory)
+# drive and the writable user drive (SD card). Each is snapshotted on its own under
+# ~/StrikeBackups/internal and ~/StrikeBackups/card.
+#
+#   tools/strike-backup.sh                 back up now (fails if no module drive is mounted)
+#   tools/strike-backup.sh --if-present    exit quietly when no drive is mounted (for launchd)
+#   tools/strike-backup.sh --force         take snapshots even if a drive looks much smaller than last time
 #
 # Env: STRIKE_BACKUP_DIR (default ~/StrikeBackups), STRIKE_BACKUP_KEEP (default 10),
-#      STRIKE_VOLUME (skip detection and back up this path instead).
+#      STRIKE_VOLUME (skip detection and back up this one path straight into STRIKE_BACKUP_DIR).
 # Uses only macOS built-ins (ioreg, diskutil, rsync), so no extra binaries need allowlisting.
 
 DEST=${STRIKE_BACKUP_DIR:-$HOME/StrikeBackups}
@@ -14,6 +18,8 @@ KEEP=${STRIKE_BACKUP_KEEP:-10}
 LOG=${STRIKE_BACKUP_LOG:-$HOME/Library/Logs/strike-backup.log}
 SETTLE_SECONDS=${STRIKE_BACKUP_SETTLE:-5}
 NOTIFY=${STRIKE_BACKUP_NOTIFY:-osascript}
+IOREG=${STRIKE_IOREG:-ioreg}
+DISKUTIL=${STRIKE_DISKUTIL:-diskutil}
 
 log() { print -r -- "$(date '+%F %T') $*" | tee -a "$LOG" }
 
@@ -23,15 +29,24 @@ fail() {
   return 1
 }
 
-# Locates the drive the way the editor does: IORegistry entry "Alesis Strike" -> BSD disk -> partition 1.
-find_volume() {
+# "internal" for the module's read-only factory drive, "card" for the writable user drive.
+disk_role() {
+  $DISKUTIL info "$1" 2>/dev/null | grep -q 'Media Read-Only: *Yes' && print internal || print card
+}
+
+# Prints "<role><TAB><mount point>" for every mounted drive under the IORegistry entry "Alesis Strike"
+# (partition 1 of each whole disk, as the editor assumes). With STRIKE_VOLUME set, prints "-<TAB><path>"
+# ("-" = no role: back up straight into STRIKE_BACKUP_DIR).
+find_volumes() {
   if [[ -n ${STRIKE_VOLUME:-} ]]; then
-    print -r -- "$STRIKE_VOLUME"
-    return
+    print -r -- "-"$'\t'"$STRIKE_VOLUME"
+    return 0
   fi
-  local bsd
-  bsd=$(ioreg -r -n "Alesis Strike" -l 2>/dev/null | awk -F'"' '/"BSD Name" = "disk[0-9]+"$/{print $4; exit}')
-  [[ -n $bsd ]] && diskutil info "${bsd}s1" 2>/dev/null | awk -F': *' '/Mount Point/{print $2; exit}'
+  local bsd mnt
+  for bsd in $($IOREG -r -n "Alesis Strike" -l 2>/dev/null | awk -F'"' '/"BSD Name" = "disk[0-9]+"$/{print $4}' | sort -u); do
+    mnt=$($DISKUTIL info "${bsd}s1" 2>/dev/null | awk -F': *' '/Mount Point/{print $2; exit}')
+    [[ -n $mnt ]] && print -r -- "$(disk_role "$bsd")"$'\t'"$mnt"
+  done
   return 0
 }
 
@@ -87,8 +102,27 @@ take_snapshot() {
   print -r -- "$target"
 }
 
+# One volume into $DEST: settle check, shrink guard, snapshot, prune. $2=1 skips the shrink guard.
+backup_volume() {
+  local volume=$1 force=${2:-0}
+  mkdir -p "$DEST"
+  # Avoid snapshotting a drive mid-write: wait until two consecutive listings match.
+  local before=$(listing "$volume"); sleep "$SETTLE_SECONDS"
+  [[ $before == $(listing "$volume") ]] || { fail "$volume still changing; try again when transfers finish"; return 1 }
+
+  local latest=$(latest_snapshot) count=$(file_count "$volume")
+  if [[ -n $latest && -f $latest/.filecount ]] && (( ! force )); then
+    local prev=$(<"$latest/.filecount")
+    shrink_ok "$count" "$prev" || { fail "$volume has $count files vs $prev in the last snapshot; refusing (use --force if intended)"; return 1 }
+  fi
+
+  local snap
+  snap=$(take_snapshot "$volume" "$latest" "$count" | tail -n 1) || return 1
+  prune
+  log "done: $snap ($(du -sh "$snap" | cut -f1) apparent, shared with previous where unchanged)"
+}
+
 main() {
-  setopt local_options err_return pipe_fail
   local if_present=0 force=0 arg
   for arg in "$@"; do
     case $arg in
@@ -97,29 +131,23 @@ main() {
       *) print -u2 "unknown option: $arg"; return 2 ;;
     esac
   done
-  mkdir -p "$DEST" "${LOG:h}"
+  mkdir -p "${LOG:h}"
 
-  local volume=$(find_volume)
-  if [[ -z $volume || ! -d $volume ]]; then
+  local base=$DEST rc=0 found=0 role volume
+  while IFS=$'\t' read -r role volume; do
+    [[ -d $volume ]] || continue
+    found=1
+    [[ $role == - ]] && DEST=$base || DEST=$base/$role
+    backup_volume "$volume" "$force" || rc=1
+  done < <(find_volumes)
+  DEST=$base
+
+  if (( ! found )); then
     (( if_present )) && return 0
     fail "Strike module drive not found (is it connected and mounted?)"
     return 1
   fi
-
-  # Avoid snapshotting a drive mid-write: wait until two consecutive listings match.
-  local before=$(listing "$volume"); sleep "$SETTLE_SECONDS"
-  [[ $before == $(listing "$volume") ]] || { fail "drive contents still changing; try again when transfers finish"; return 1 }
-
-  local latest=$(latest_snapshot) count=$(file_count "$volume")
-  if [[ -n $latest && -f $latest/.filecount ]] && (( ! force )); then
-    local prev=$(<"$latest/.filecount")
-    shrink_ok "$count" "$prev" || { fail "drive has $count files vs $prev in the last snapshot; refusing (use --force if intended)"; return 1 }
-  fi
-
-  local snap
-  snap=$(take_snapshot "$volume" "$latest" "$count" | tail -n 1) || return 1
-  prune
-  log "done: $snap ($(du -sh "$snap" | cut -f1) apparent, shared with previous where unchanged)"
+  return $rc
 }
 
 # Run only when executed, not when sourced by the tests.
